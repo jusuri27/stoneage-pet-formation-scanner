@@ -1,14 +1,17 @@
 """
-월드 리그전 랭킹 목록에서 "4위", "5위", "6위" 글자를 찾아 마우스로 클릭하는 스크립트.
+월드 리그전 랭킹 목록에서 "N위" 글자를 찾아 클릭 -> 펫 편성 화면 스크린샷 저장을
+RANK_RANGE 범위(기본 4위~100위) 전체에 대해 반복하는 스크립트.
 
 동작 방식
 ---------
 1. PC에 떠 있는 에뮬레이터(블루스택/LD플레이어 등) 창을 이름으로 찾는다.
-2. 그 창 영역만 스크린샷으로 캡처한다.
-3. Tesseract OCR로 화면에서 텍스트와 그 위치(좌표)를 읽어온다.
-4. "N위" 형태의 텍스트 중 TARGET_RANKS 에 있는 것을 찾아 마우스로 클릭한다.
-5. 아직 못 찾은 순위가 남아 있으면 목록을 살짝 스크롤(드래그)하고 2번부터 반복한다.
-6. TARGET_RANKS 를 모두 클릭했거나 최대 스크롤 횟수에 도달하면 종료한다.
+2. 그 창 영역만 스크린샷으로 캡처하고 Tesseract OCR로 텍스트와 위치를 읽어온다.
+3. "N위" 형태의 텍스트 중 아직 처리 안 한 TARGET_RANKS 항목을 화면에서 찾으면:
+   a. 그 위치를 클릭 -> 펫 편성 화면이 뜰 때까지 대기
+   b. 화면을 캡처해서 screenshots/rank_N.png 로 저장
+   c. ESC 를 눌러 목록으로 복귀 -> 대기 후 2번부터 다시 반복 (스크롤 없이 같은 화면 먼저 확인)
+4. 화면에서 못 찾으면 목록을 살짝 스크롤(드래그)하고 2번부터 반복한다.
+5. TARGET_RANKS 를 모두 처리했거나 최대 스크롤 횟수에 도달하면 종료한다.
 
 사전 준비
 ---------
@@ -54,9 +57,12 @@ from pytesseract import Output
 # 에 직접 넣었다면 이 값은 비워둬도(None) 된다.
 TESSDATA_DIR = os.path.expandvars(r"%LOCALAPPDATA%\tessdata")
 
-# 클릭하고 싶은 순위 목록. "N위" 형태의 텍스트와 정확히 일치해야 매칭된다.
-# TARGET_RANKS = ["4위", "5위", "6위", "7위", "8위", "9위"]
-TARGET_RANKS = ["8위", "9위"]
+# 클릭할 순위 범위 (시작, 끝) 양쪽 다 포함. 예: (4, 100) -> 4위~100위.
+RANK_RANGE = (4, 100)
+
+# TARGET_RANKS 는 RANK_RANGE 로부터 자동 생성된다. "N위" 형태의 텍스트와 정확히
+# 일치해야 매칭되므로 직접 수정하지 말고 RANK_RANGE 를 바꿀 것.
+TARGET_RANKS = [f"{n}위" for n in range(RANK_RANGE[0], RANK_RANGE[1] + 1)]
 
 # 에뮬레이터 창 제목에 포함된 문자열(일부만 맞아도 됨). 대소문자 구분 없음.
 # WINDOW_TITLE = "BlueStacks"
@@ -78,8 +84,14 @@ TESSERACT_CONFIG = "--psm 11"
 # 너무 크면 옆의 무관한 텍스트/아이콘까지 하나로 합쳐진다.
 WORD_GAP_PX = 15
 
-# 클릭 사이 대기 시간(초). 게임 반응/화면 전환 여유 시간.
-CLICK_DELAY = 1.0
+# 순위 텍스트 클릭 후 펫 편성 화면이 다 뜰 때까지 대기 시간(초)
+WAIT_AFTER_CLICK = 1.5
+
+# 스크린샷 저장 후 ESC 눌러 목록으로 돌아왔을 때, 목록이 다시 안정될 때까지 대기 시간(초)
+WAIT_AFTER_ESC = 0.8
+
+# 펫 편성 화면 스크린샷을 저장할 폴더. 기존 rank_1.png 등이 있는 프로젝트 루트의 screenshots/ 사용.
+SCREENSHOTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "screenshots")
 
 # 스크롤 방식: "drag"(마우스 드래그로 스와이프) 또는 "wheel"(마우스 휠)
 SCROLL_METHOD = "drag"
@@ -90,8 +102,10 @@ SCROLL_PIXELS = 150
 # 스크롤 후 화면이 안정될 때까지 대기 시간(초)
 SCROLL_WAIT = 0.8
 
-# 목표 순위를 다 못 찾았을 때 최대 몇 번까지 스크롤을 반복할지
-MAX_SCROLLS = 15
+# 목표 순위를 다 못 찾았을 때 최대 몇 번까지 스크롤을 반복할지.
+# 4~100위(97개)를 다 훑어야 하므로 넉넉하게 잡는다. 화면에 한 번에 여러 순위가 보이고
+# 스크롤 한 번에 여러 줄씩 넘어가는 걸 감안한 값이라, 실제로 부족하면 늘려서 재실행하면 된다.
+MAX_SCROLLS = 60
 
 # True 로 하면 실제 클릭 없이 어디를 클릭할지 콘솔에만 출력(동작 확인용)
 DRY_RUN = False
@@ -206,6 +220,33 @@ def extract_rank_boxes(image: Image.Image, win_left: int, win_top: int) -> list[
     return boxes
 
 
+def parse_rank_number(text: str) -> int | None:
+    """"8위" 같은 텍스트에서 순위 숫자만 뽑아낸다. 형식이 안 맞으면 None."""
+    m = RANK_PATTERN.match(text)
+    return int(m.group(1)) if m else None
+
+
+def is_point_in_window(win, x: int, y: int) -> bool:
+    """클릭하려는 좌표가 창 범위 안에 있는지 확인.
+    OCR 좌표 계산이 잘못돼서 창 밖 좌표가 나오면 실수로 다른 창을 클릭하지 않도록 막는다."""
+    return win.left <= x <= win.left + win.width and win.top <= y <= win.top + win.height
+
+
+def save_rank_screenshot(win, rank_num: int) -> bool:
+    """현재 화면(펫 편성 화면)을 캡처해서 screenshots/rank_N.png 로 저장.
+    저장에 실패해도 전체 스크립트가 멈추지 않도록 예외를 여기서 잡고 성공 여부만 반환한다."""
+    try:
+        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+        image = capture_window(win)
+        path = os.path.join(SCREENSHOTS_DIR, f"rank_{rank_num}.png")
+        image.save(path)
+        print(f"  -> 스크린샷 저장: {path}")
+        return True
+    except OSError as e:
+        print(f"  [오류] {rank_num}위 스크린샷 저장 실패: {e}")
+        return False
+
+
 def scroll_down(win) -> None:
     cx = win.left + win.width // 2
     cy_top = win.top + int(win.height * 0.6)
@@ -228,43 +269,80 @@ def main() -> None:
     if TESSDATA_DIR:
         os.environ["TESSDATA_PREFIX"] = TESSDATA_DIR
 
-    win = find_emulator_window(WINDOW_TITLE)
+    try:
+        win = find_emulator_window(WINDOW_TITLE)
+    except Exception as e:
+        print(f"[오류] 에뮬레이터 창을 찾는 중 문제 발생: {e}")
+        return
     print(f'대상 창: "{win.title}" ({win.left},{win.top} {win.width}x{win.height})')
 
     remaining = list(TARGET_RANKS)
-    clicked: set[str] = set()
+    done: set[str] = set()
+    failed: set[str] = set()  # 좌표 이상/스크린샷 저장 실패 등으로 건너뛴 순위
 
-    for scroll_attempt in range(MAX_SCROLLS + 1):
-        if not remaining:
+    scroll_attempt = 0
+    while remaining and scroll_attempt <= MAX_SCROLLS:
+        try:
+            image = capture_window(win)
+        except Exception as e:
+            print(f"[오류] 화면 캡처 실패: {e}")
             break
 
-        image = capture_window(win)
         boxes = extract_rank_boxes(image, win.left, win.top)
-        found_texts = [b.text for b in boxes]
-        print(f"[시도 {scroll_attempt}] OCR로 찾은 'N위' 텍스트: {found_texts}")
+        print(f"[스크롤 {scroll_attempt}] OCR로 찾은 'N위' 텍스트: {[b.text for b in boxes]}")
 
-        for box in boxes:
-            if box.text in remaining and box.text not in clicked:
-                x, y = box.center
-                print(f'  -> "{box.text}" 클릭 위치: ({x}, {y})')
-                if not DRY_RUN:
+        # 화면에 보이는 목표 중 하나만 골라 처리한다. 클릭 한 번에 화면이 통째로 바뀌므로
+        # 이전에 계산해둔 다른 박스 좌표는 더 이상 신뢰할 수 없다 -> 처리 후 매번 재캡처.
+        match = next((b for b in boxes if b.text in remaining), None)
+
+        if match is not None:
+            rank_num = parse_rank_number(match.text)
+            x, y = match.center
+
+            if rank_num is None or not is_point_in_window(win, x, y):
+                print(f'  [오류] "{match.text}" 클릭 좌표가 비정상적이라 건너뜀: ({x}, {y})')
+                remaining.remove(match.text)
+                failed.add(match.text)
+                continue
+
+            print(f'  -> "{match.text}" 클릭 (좌표: {x}, {y})')
+            if DRY_RUN:
+                done.add(match.text)
+            else:
+                try:
                     pyautogui.moveTo(x, y, duration=0.2)
                     pyautogui.click()
-                clicked.add(box.text)
-                remaining.remove(box.text)
-                time.sleep(CLICK_DELAY)
+                    time.sleep(WAIT_AFTER_CLICK)  # 펫 편성 화면 로딩 대기
 
-        if not remaining:
-            break
+                    if save_rank_screenshot(win, rank_num):
+                        done.add(match.text)
+                    else:
+                        failed.add(match.text)
 
-        if scroll_attempt < MAX_SCROLLS:
-            print(f"  아직 못 찾음: {remaining} -> 스크롤 후 재시도")
-            scroll_down(win)
+                    pyautogui.press("esc")
+                    time.sleep(WAIT_AFTER_ESC)  # 목록 화면 복귀 대기
+                except Exception as e:
+                    print(f'  [오류] "{match.text}" 처리 중 문제 발생: {e}')
+                    failed.add(match.text)
 
+            remaining.remove(match.text)
+            continue  # 스크롤 없이 같은 화면에서 남은 목표를 이어서 탐색
+
+        # 이번 화면에서 못 찾았으면 스크롤해서 다음 화면으로
+        scroll_attempt += 1
+        if scroll_attempt <= MAX_SCROLLS:
+            print(f"  이 화면에는 없음 -> 스크롤 후 재탐색 ({scroll_attempt}/{MAX_SCROLLS})")
+            try:
+                scroll_down(win)
+            except Exception as e:
+                print(f"[오류] 스크롤 실패: {e}")
+                break
+
+    print(f"\n완료: {len(done)}개, 실패: {len(failed)}개, 못 찾음: {len(remaining)}개")
+    if failed:
+        print(f"  실패 목록: {sorted(failed, key=parse_rank_number)}")
     if remaining:
-        print(f"\n찾지 못한 순위: {remaining} (MAX_SCROLLS={MAX_SCROLLS} 도달)")
-    else:
-        print("\n모든 대상 순위를 클릭 완료했습니다.")
+        print(f"  못 찾은 목록: {remaining}")
 
 
 if __name__ == "__main__":
