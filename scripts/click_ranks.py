@@ -107,6 +107,15 @@ SCROLL_WAIT = 0.8
 # 스크롤 한 번에 여러 줄씩 넘어가는 걸 감안한 값이라, 실제로 부족하면 늘려서 재실행하면 된다.
 MAX_SCROLLS = 60
 
+# "gap" 재시도: 방금 처리한 순위(예: 6위)보다 작은 번호(예: 4위, 5위)가 아직 안 끝났다면,
+# 화면을 지나쳐서 놓친 게 아니라 그 화면에서 OCR이 그 줄을 못 읽은 것으로 판단하고
+# 위로 살짝 스크롤해서 다시 찾는다. 이때 최대 몇 번까지 위로 스크롤하며 재시도할지.
+GAP_RETRY_SCROLLS = 3
+
+# gap 재시도용 위로 스크롤은 관성(플링)으로 과하게 튀지 않도록, 짧은 거리를 여러 단계로
+# 나눠 천천히 움직이다 멈춘 채로 잠깐 대기한 뒤 뗀다. 그 이동 거리(픽셀).
+GAP_RETRY_SCROLL_PIXELS = 100
+
 # True 로 하면 실제 클릭 없이 어디를 클릭할지 콘솔에만 출력(동작 확인용)
 DRY_RUN = False
 
@@ -264,6 +273,100 @@ def scroll_down(win) -> None:
     time.sleep(SCROLL_WAIT)
 
 
+def scroll_up(win) -> None:
+    """gap 재시도용으로 목록을 아주 살짝 위로 되돌린다.
+    scroll_down 처럼 한 번에 빠르게 드래그하면 모바일 UI 특유의 관성(플링) 때문에
+    의도한 것보다 훨씬 많이 튕겨서, 놓친 줄을 다시 지나쳐버릴 수 있다. 그래서 여기서는
+    짧은 거리를 여러 단계로 나눠 천천히 이동하고, 마지막에 멈춘 채로 잠깐 대기했다가
+    손을 떼서 관성이 거의 붙지 않게 한다."""
+    cx = win.left + win.width // 2
+    cy_start = win.top + int(win.height * 0.4)
+    steps = 6
+
+    pyautogui.moveTo(cx, cy_start, duration=0.1)
+    pyautogui.mouseDown()
+    for i in range(1, steps + 1):
+        y = cy_start + int(GAP_RETRY_SCROLL_PIXELS * i / steps)
+        pyautogui.moveTo(cx, y, duration=0.05)
+    time.sleep(0.15)  # 움직임을 멈춘 채로 대기 -> 관성(플링) 방지
+    pyautogui.mouseUp()
+
+    time.sleep(SCROLL_WAIT)
+
+
+def process_match(win, box: TextBox, remaining: list[str], done: set[str], failed: set[str]) -> int | None:
+    """OCR로 찾은 "N위" 박스 하나를 실제로 처리한다: 좌표 검증 -> 클릭 -> 펫 편성 화면
+    로딩 대기 -> 스크린샷 저장 -> ESC로 목록 복귀. remaining/done/failed 를 제자리에서 갱신하고,
+    처리한 순위 숫자를 반환한다(좌표가 비정상이면 None)."""
+    rank_num = parse_rank_number(box.text)
+    x, y = box.center
+
+    if rank_num is None or not is_point_in_window(win, x, y):
+        print(f'  [오류] "{box.text}" 클릭 좌표가 비정상적이라 건너뜀: ({x}, {y})')
+        remaining.remove(box.text)
+        failed.add(box.text)
+        return None
+
+    print(f'  -> "{box.text}" 클릭 (좌표: {x}, {y})')
+    if DRY_RUN:
+        done.add(box.text)
+    else:
+        try:
+            pyautogui.moveTo(x, y, duration=0.2)
+            pyautogui.click()
+            time.sleep(WAIT_AFTER_CLICK)  # 펫 편성 화면 로딩 대기
+
+            if save_rank_screenshot(win, rank_num):
+                done.add(box.text)
+            else:
+                failed.add(box.text)
+
+            pyautogui.press("esc")
+            time.sleep(WAIT_AFTER_ESC)  # 목록 화면 복귀 대기
+        except Exception as e:
+            print(f'  [오류] "{box.text}" 처리 중 문제 발생: {e}')
+            failed.add(box.text)
+
+    remaining.remove(box.text)
+    return rank_num
+
+
+def retry_missing_smaller_ranks(win, rank_num: int, remaining: list[str], done: set[str], failed: set[str]) -> None:
+    """방금 rank_num 을 화면에서 찾아 처리했는데 그보다 작은 번호가 아직 remaining 에 남아있다면,
+    화면을 이미 지나쳤어야 할 순위를 OCR이 놓친 것으로 보고 위로 살짝 스크롤하며 다시 찾는다.
+    (뒷 순위는 인식했는데 앞 순위를 못 찾았다는 건 화면을 건너뛴 게 아니라 그 줄의 OCR
+    인식 실패일 가능성이 높다는 판단에 따른 것)"""
+    missing_smaller = sorted(n for n in map(parse_rank_number, remaining) if n is not None and n < rank_num)
+    if not missing_smaller:
+        return
+
+    print(f"  [gap] {rank_num}위보다 작은 미완료 순위 발견: {missing_smaller} -> 위로 스크롤하며 재탐색")
+    target_texts = {f"{n}위" for n in missing_smaller}
+
+    for attempt in range(1, GAP_RETRY_SCROLLS + 1):
+        try:
+            scroll_up(win)
+            image = capture_window(win)
+        except Exception as e:
+            print(f"  [오류] gap 재시도 중 문제 발생: {e}")
+            break
+
+        boxes = extract_rank_boxes(image, win.left, win.top)
+        print(f"  [gap 재시도 {attempt}/{GAP_RETRY_SCROLLS}] OCR로 찾은 'N위' 텍스트: {[b.text for b in boxes]}")
+
+        for box in boxes:
+            if box.text in target_texts and box.text in remaining:
+                process_match(win, box, remaining, done, failed)
+                target_texts.discard(box.text)
+
+        if not target_texts:
+            print("  [gap] 놓친 순위 재탐색 성공")
+            break
+    else:
+        print(f"  [gap] {GAP_RETRY_SCROLLS}번 재시도했지만 여전히 못 찾음: "
+              f"{sorted(target_texts, key=parse_rank_number)}")
+
+
 def main() -> None:
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
     if TESSDATA_DIR:
@@ -296,36 +399,9 @@ def main() -> None:
         match = next((b for b in boxes if b.text in remaining), None)
 
         if match is not None:
-            rank_num = parse_rank_number(match.text)
-            x, y = match.center
-
-            if rank_num is None or not is_point_in_window(win, x, y):
-                print(f'  [오류] "{match.text}" 클릭 좌표가 비정상적이라 건너뜀: ({x}, {y})')
-                remaining.remove(match.text)
-                failed.add(match.text)
-                continue
-
-            print(f'  -> "{match.text}" 클릭 (좌표: {x}, {y})')
-            if DRY_RUN:
-                done.add(match.text)
-            else:
-                try:
-                    pyautogui.moveTo(x, y, duration=0.2)
-                    pyautogui.click()
-                    time.sleep(WAIT_AFTER_CLICK)  # 펫 편성 화면 로딩 대기
-
-                    if save_rank_screenshot(win, rank_num):
-                        done.add(match.text)
-                    else:
-                        failed.add(match.text)
-
-                    pyautogui.press("esc")
-                    time.sleep(WAIT_AFTER_ESC)  # 목록 화면 복귀 대기
-                except Exception as e:
-                    print(f'  [오류] "{match.text}" 처리 중 문제 발생: {e}')
-                    failed.add(match.text)
-
-            remaining.remove(match.text)
+            rank_num = process_match(win, match, remaining, done, failed)
+            if rank_num is not None:
+                retry_missing_smaller_ranks(win, rank_num, remaining, done, failed)
             continue  # 스크롤 없이 같은 화면에서 남은 목표를 이어서 탐색
 
         # 이번 화면에서 못 찾았으면 스크롤해서 다음 화면으로
