@@ -54,11 +54,31 @@ RANK_COORDS_FRAC: dict[int, tuple[float, float]] = {
     7: (0.1203, 0.7130),
 }
 
+# 고정 좌표로 클릭할 수 있는 마지막 순위. 이 이후(8위~)는 스크롤로 화면을 끌어올려서
+# 같은 좌표(LAST_FIXED_RANK 자리)를 재사용해 클릭한다.
+LAST_FIXED_RANK = 7
+
+# 목록 한 행(row)의 세로 높이 비율(창 높이 기준). RANK_COORDS_FRAC 의 4~7위 y값 간격
+# 평균으로 계산한 기준값(0.09903)에 스크롤이 살짝 부족한 것 같아 여유를 더 준 값.
+# 8위 이후 스크롤할 때마다 기본적으로 이 값만큼(창 높이 곱해서) 스크롤한다.
+ROW_HEIGHT_FRAC = 0.104
+
+# 매번 조금씩 더 스크롤하다 보면 오차가 누적될 수 있어서, CORRECTION_INTERVAL 번째
+# 스크롤마다 한 번씩은 원래 계산값(0.099)으로 되돌려 보정한다.
+ROW_HEIGHT_FRAC_CORRECTION = 0.099
+CORRECTION_INTERVAL = 10
+
+# 마지막으로 캡처할 순위
+LAST_RANK = 100
+
 # 클릭 후 펫 편성 화면이 다 뜰 때까지 대기 시간(초)
-WAIT_AFTER_CLICK = 1.5
+WAIT_AFTER_CLICK = 1.8
 
 # ESC로 목록 복귀 후 안정될 때까지 대기 시간(초)
-WAIT_AFTER_ESC = 0.8
+WAIT_AFTER_ESC = 1.1
+
+# 스크롤 후 화면이 안정될 때까지 대기 시간(초)
+SCROLL_WAIT = 1.4
 
 # True 로 하면 실제 클릭 없이 어디를 클릭할지 콘솔에만 출력(좌표 확인용)
 DRY_RUN = False
@@ -111,6 +131,28 @@ def save_rank_screenshot(win, rank_num: int) -> bool:
         return False
 
 
+def scroll_one_row(win, row_height_frac: float = ROW_HEIGHT_FRAC) -> None:
+    """목록을 row_height_frac(창 높이 비율) 만큼 아래로 스크롤한다.
+    빠른 드래그는 모바일 UI 특유의 관성(플링) 때문에 스크롤 거리가 매번 달라질 수 있는데,
+    이 스크립트는 좌표를 그대로 재사용하는 방식이라 스크롤 거리가 어긋나면 그 이후 모든
+    순위가 밀려버린다. 그래서 짧은 거리를 여러 단계로 나눠 천천히 이동하고, 마지막에
+    멈춘 채로 잠깐 대기했다가 손을 떼서 관성 없이 최대한 일정하게 움직이도록 한다."""
+    cx = win.left + win.width // 2
+    cy_top = win.top + int(win.height * 0.6)
+    row_px = int(row_height_frac * win.height)
+    steps = 6
+
+    pyautogui.moveTo(cx, cy_top, duration=0.1)
+    pyautogui.mouseDown()
+    for i in range(1, steps + 1):
+        y = cy_top - int(row_px * i / steps)
+        pyautogui.moveTo(cx, y, duration=0.05)
+    time.sleep(0.15)  # 움직임을 멈춘 채로 대기 -> 관성(플링) 방지
+    pyautogui.mouseUp()
+
+    time.sleep(SCROLL_WAIT)
+
+
 def coord_to_pixels(win, x_frac: float, y_frac: float) -> tuple[int, int]:
     """비율 좌표(0~1)를 현재 창 크기 기준 절대 화면 좌표로 변환."""
     x = win.left + round(x_frac * win.width)
@@ -157,6 +199,29 @@ def main() -> None:
     # 1~7위: 스크롤 없이 고정 좌표를 순서대로 클릭
     for rank_num in sorted(RANK_COORDS_FRAC):
         x_frac, y_frac = RANK_COORDS_FRAC[rank_num]
+        x, y = coord_to_pixels(win, x_frac, y_frac)
+        if not click_and_capture(win, rank_num, x, y):
+            failed.append(rank_num)
+
+    # 8위~100위: 매번 한 행씩 스크롤해서 LAST_FIXED_RANK(7위) 자리로 다음 순위를 끌어올린 뒤,
+    # 그 좌표를 그대로 재사용해서 클릭. (이전에 클릭했던 7위 위치 + 스크롤 반복)
+    x_frac, y_frac = RANK_COORDS_FRAC[LAST_FIXED_RANK]
+    for scroll_count, rank_num in enumerate(range(LAST_FIXED_RANK + 1, LAST_RANK + 1), start=1):
+        # CORRECTION_INTERVAL 번째 스크롤마다 보정값(ROW_HEIGHT_FRAC_CORRECTION)을 사용해
+        # 누적된 오차를 되돌린다.
+        if scroll_count % CORRECTION_INTERVAL == 0:
+            row_height_frac = ROW_HEIGHT_FRAC_CORRECTION
+            print(f"  [보정] {scroll_count}번째 스크롤 -> ROW_HEIGHT_FRAC={row_height_frac}")
+        else:
+            row_height_frac = ROW_HEIGHT_FRAC
+
+        try:
+            scroll_one_row(win, row_height_frac)
+        except Exception as e:
+            print(f"[오류] {rank_num}위 스크롤 실패: {e}")
+            failed.append(rank_num)
+            continue
+
         x, y = coord_to_pixels(win, x_frac, y_frac)
         if not click_and_capture(win, rank_num, x, y):
             failed.append(rank_num)
