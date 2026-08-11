@@ -86,12 +86,12 @@ LAST_FIXED_RANK = 7
 # 목록 한 행(row)의 세로 높이 비율(창 높이 기준). RANK_COORDS_FRAC 의 4~7위 y값 간격
 # 평균으로 계산한 기준값(0.09903)에 스크롤이 살짝 부족한 것 같아 여유를 더 준 값.
 # 8위 이후 스크롤할 때마다 기본적으로 이 값만큼(창 높이 곱해서) 스크롤한다.
-ROW_HEIGHT_FRAC = 0.104
+ROW_HEIGHT_FRAC = 0.101
 
 # 매번 조금씩 더 스크롤하다 보면 오차가 누적될 수 있어서, CORRECTION_INTERVAL 번째
-# 스크롤마다 한 번씩은 원래 계산값(0.079)으로 되돌려 보정한다.
-ROW_HEIGHT_FRAC_CORRECTION = 0.069
-CORRECTION_INTERVAL = 10
+# 스크롤마다 한 번씩은 원래 계산값(0.09)으로 되돌려 보정한다.
+ROW_HEIGHT_FRAC_CORRECTION = 0.09
+CORRECTION_INTERVAL = 20
 
 # 마지막으로 캡처할 순위
 LAST_RANK = 100
