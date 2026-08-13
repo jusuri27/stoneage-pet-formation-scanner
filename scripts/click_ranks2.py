@@ -40,7 +40,11 @@ example/example_image.png(557x993)를 OCR로 한 번 분석해서 "N위" 텍스�
   파티 배치 화면(균일 6x6 격자)에서 실측한 격자선 위치로 25개 2x2 블록 중심을 미리
   계산해 고정 좌표(GRID_CENTERS_FRAC)로 써서 순서대로(1~25번) 클릭한다. 이 좌표들이
   실제 편성 보기 화면에서도 그대로 맞는지는 라이브 테스트로 확인함.
-- 스크린샷 저장은 아직 구현하지 않았다(클릭까지만 동작).
+- 25개 좌표 중 1번(첫 클릭) 좌표만 우선 구현: 클릭 후 화면을 캡처해서 assets/ 폴더의
+  캐릭터 초상화 6장과 OpenCV 템플릿 매칭으로 비교, 가장 점수 높은 이름으로
+  screenshots/rank_N_이름.png 를 저장한다. 실측해보니 정답 캐릭터는 점수가 1.0에
+  가깝고 나머지는 0.6을 못 넘어서 구분이 뚜렷하다. 2~25번은 아직 클릭만 하고 저장은
+  구현 안 함(TODO).
 """
 
 from __future__ import annotations
@@ -72,6 +76,14 @@ CHECK_TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspa
 
 # 템플릿 매칭 점수(0~1, 1이 완전 일치)가 이 값 이상이면 "아직 펫 편성 화면"으로 판단.
 CHECK_MATCH_THRESHOLD = 0.8
+
+# 캐릭터 초상화 이미지(이름별 png) 폴더. 격자 좌표 클릭 후 화면을 이 이미지들과 템플릿
+# 매칭해서 어떤 캐릭터인지 식별하는 데 쓴다.
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
+
+# 초상화 템플릿 매칭 점수(0~1)가 이 값 이상이어야 "이 캐릭터"로 확정한다. 실측해보니
+# 정답 캐릭터는 1.0에 가깝고 오답은 0.6을 못 넘어서 여유 있게 잡았다.
+ASSET_MATCH_THRESHOLD = 0.8
 
 # ESC가 씹혀서 여전히 펫 편성 화면일 때 다시 눌러볼 최대 횟수.
 # 다 써도 안 빠져나오면 강제로 다음 순위로 넘어간다(무한루프 방지).
@@ -189,6 +201,50 @@ def load_check_template() -> np.ndarray:
     return template
 
 
+def load_asset_templates() -> dict[str, np.ndarray]:
+    """assets/ 폴더의 캐릭터 초상화 이미지를 전부 불러와 {이름: BGR 이미지} 로 반환.
+    main() 시작 시 한 번만 불러와 재사용한다(격자 좌표를 클릭할 때마다 다시 읽지 않음).
+    폴더가 없거나 이미지를 하나도 못 읽으면 이후 매칭이 전부 무의미해지므로 예외를
+    그대로 올려서 스크립트 시작 전에 바로 알 수 있게 한다."""
+    if not os.path.isdir(ASSETS_DIR):
+        raise FileNotFoundError(f"assets 폴더를 찾을 수 없음: {ASSETS_DIR}")
+
+    templates: dict[str, np.ndarray] = {}
+    for filename in sorted(os.listdir(ASSETS_DIR)):
+        if not filename.lower().endswith(".png"):
+            continue
+        path = os.path.join(ASSETS_DIR, filename)
+        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise FileNotFoundError(f"asset 이미지를 읽을 수 없음: {path}")
+        if img.shape[2] == 4:  # RGBA -> BGR (알파 채널 제거)
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        name = os.path.splitext(filename)[0]
+        templates[name] = img
+
+    if not templates:
+        raise FileNotFoundError(f"assets 폴더에 png 이미지가 하나도 없음: {ASSETS_DIR}")
+    return templates
+
+
+def match_asset_name(screenshot: Image.Image, asset_templates: dict[str, np.ndarray]) -> str | None:
+    """화면 스크린샷을 assets 의 캐릭터 초상화들과 하나씩 템플릿 매칭해서 가장 점수가
+    높은 이름을 반환한다. 최고 점수가 ASSET_MATCH_THRESHOLD 미만이면(확신할 수 없으면)
+    None을 반환해 호출부가 "매칭 실패"로 처리하게 한다."""
+    screen_bgr = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+
+    best_name: str | None = None
+    best_score = -1.0
+    for name, template in asset_templates.items():
+        result = cv2.matchTemplate(screen_bgr, template, cv2.TM_CCOEFF_NORMED)
+        _, score, _, _ = cv2.minMaxLoc(result)
+        if score > best_score:
+            best_name, best_score = name, score
+
+    print(f"    [초상화 매칭] 최고 점수: {best_name}={best_score:.3f} (threshold={ASSET_MATCH_THRESHOLD})")
+    return best_name if best_score >= ASSET_MATCH_THRESHOLD else None
+
+
 def save_debug_screenshot(image: Image.Image, rank_num: int, attempt: int) -> None:
     """ESC 재시도가 발생한 순간의 화면을 debug_screenshots/rank_N_attemptN.png 로 저장.
     템플릿 매칭이 왜 "아직 편성 화면"이라고 판단했는지(진짜 잔류인지 오탐인지) 나중에 눈으로
@@ -241,11 +297,13 @@ def save_rank_screenshot(image: Image.Image, rank_num: int) -> bool:
         return False
 
 
-def click_grid_centers(win, rank_num: int) -> None:
+def click_grid_centers(win, rank_num: int, asset_templates: dict[str, np.ndarray]) -> None:
     """GRID_CENTERS_FRAC 의 25개 격자 중심 좌표를 1~25번 순서대로 클릭한다.
-    클릭해도 팝업 없이 선택만 되는 동작이라 좌표끼리는 별도 대기/복귀 없이 이어서 진행한다.
-    스크린샷 저장은 아직 미구현(TODO). 한 좌표 처리가 실패해도(좌표 범위 오류, 클릭 실패 등)
-    나머지 좌표는 계속 처리한다."""
+    1번(첫 클릭) 좌표만 클릭 후 화면을 캡처해서 assets 초상화와 매칭하고, 매칭된 이름으로
+    screenshots/rank_N_이름.png 를 저장한다(우선 1번만 구현, 2~25번은 클릭만 하고 저장은
+    TODO). 클릭해도 팝업 없이 선택만 되는 동작이라 좌표끼리는 별도 대기/복귀 없이 이어서
+    진행한다. 한 좌표 처리가 실패해도(좌표 범위 오류, 클릭/매칭/저장 실패 등) 나머지
+    좌표는 계속 처리한다."""
     for idx, (x_frac, y_frac) in enumerate(GRID_CENTERS_FRAC, start=1):
         x, y = coord_to_pixels(win, x_frac, y_frac)
 
@@ -257,8 +315,22 @@ def click_grid_centers(win, rank_num: int) -> None:
             pyautogui.moveTo(x, y, duration=0.15)
             pyautogui.click()
             time.sleep(WAIT_AFTER_GROUP_CLICK)  # 선택 표시 반영 대기
-            print(f"    -> {idx}번 격자 좌표 클릭 완료 ({x}, {y})")
-            # TODO: 좌표별 스크린샷 저장 기능은 아직 구현 안 함
+
+            if idx == 1:
+                screenshot = capture_window(win)
+                matched_name = match_asset_name(screenshot, asset_templates)
+                if matched_name is None:
+                    print(f"  [경고] {rank_num}위 1번 좌표 초상화를 특정하지 못함(임계값 미달) "
+                          f"-> unknown 으로 저장")
+                    matched_name = "unknown"
+
+                os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+                path = os.path.join(SCREENSHOTS_DIR, f"rank_{rank_num}_{matched_name}.png")
+                screenshot.save(path)
+                print(f"    -> 1번 격자 좌표 클릭 및 매칭 스크린샷 저장: {path}")
+            else:
+                print(f"    -> {idx}번 격자 좌표 클릭 완료 ({x}, {y})")
+                # TODO: 2~25번 좌표의 스크린샷 저장/매칭 기능은 아직 구현 안 함
         except Exception as e:
             print(f"  [오류] {rank_num}위 {idx}번 격자 좌표 처리 중 문제 발생: {e}")
 
@@ -292,7 +364,14 @@ def coord_to_pixels(win, x_frac: float, y_frac: float) -> tuple[int, int]:
     return x, y
 
 
-def click_and_capture(win, rank_num: int, x: int, y: int, check_template: np.ndarray) -> bool:
+def click_and_capture(
+    win,
+    rank_num: int,
+    x: int,
+    y: int,
+    check_template: np.ndarray,
+    asset_templates: dict[str, np.ndarray],
+) -> bool:
     """좌표를 클릭해서 펫 편성 화면을 캡처/저장하고 ESC로 목록에 복귀한다.
     성공 여부를 반환하며, 실패해도 예외를 여기서 잡아 다음 순위 진행에 지장이 없게 한다."""
     if not is_point_in_window(win, x, y):
@@ -311,8 +390,8 @@ def click_and_capture(win, rank_num: int, x: int, y: int, check_template: np.nda
         image = capture_window(win)
         ok = save_rank_screenshot(image, rank_num)
 
-        # 25개 격자 중심 좌표를 1~25번 순서대로 클릭 (스크린샷 저장은 아직 미구현)
-        click_grid_centers(win, rank_num)
+        # 25개 격자 중심 좌표를 1~25번 순서대로 클릭 (1번만 캡처+매칭+저장, 2~25번은 미구현)
+        click_grid_centers(win, rank_num, asset_templates)
 
         # ESC를 누른 뒤 실제로 목록 화면으로 돌아왔는지 템플릿 매칭으로 확인한다. 렉 등으로
         # ESC 입력이 씹혀서 편성 화면에 그대로 머무는 경우가 있어, check.png 배경이 여전히
@@ -344,6 +423,12 @@ def main() -> None:
         return
 
     try:
+        asset_templates = load_asset_templates()
+    except Exception as e:
+        print(f"[오류] 캐릭터 초상화 이미지를 불러오는 중 문제 발생: {e}")
+        return
+
+    try:
         win = find_emulator_window(WINDOW_TITLE)
     except Exception as e:
         print(f"[오류] 에뮬레이터 창을 찾는 중 문제 발생: {e}")
@@ -356,7 +441,7 @@ def main() -> None:
     for rank_num in sorted(RANK_COORDS_FRAC):
         x_frac, y_frac = RANK_COORDS_FRAC[rank_num]
         x, y = coord_to_pixels(win, x_frac, y_frac)
-        if not click_and_capture(win, rank_num, x, y, check_template):
+        if not click_and_capture(win, rank_num, x, y, check_template, asset_templates):
             failed.append(rank_num)
 
     # 8위~100위: 매번 한 행씩 스크롤해서 LAST_FIXED_RANK(7위) 자리로 다음 순위를 끌어올린 뒤,
@@ -379,7 +464,7 @@ def main() -> None:
             continue
 
         x, y = coord_to_pixels(win, x_frac, y_frac)
-        if not click_and_capture(win, rank_num, x, y, check_template):
+        if not click_and_capture(win, rank_num, x, y, check_template, asset_templates):
             failed.append(rank_num)
 
     print(f"\n완료. 실패: {len(failed)}개")
