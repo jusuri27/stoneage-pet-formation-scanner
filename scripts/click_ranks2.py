@@ -32,6 +32,15 @@ example/example_image.png(557x993)를 OCR로 한 번 분석해서 "N위" 텍스�
 - check.png 도 example_image.png(557x993)와 같은 해상도에서 잘라낸 것이라, 실제 LDPlayer
   창 해상도가 다르면(보통 600x1030) 벽돌 무늬 크기가 살짝 달라 매칭 점수가 낮게 나올 수
   있다. CHECK_MATCH_THRESHOLD 로 조정.
+
+*** 격자 중심 클릭 ***
+- 처음엔 pet_group_centers.py로 스크린샷마다 타일 배경색을 분석해서 6개 그룹 중심을
+  찾는 방식을 썼는데, 일부 그룹은 탐색범위 경계에 항상 걸려서 사실상 고정 좌표처럼
+  동작하는 등 이미지 분석 자체가 불안정했다(위험성이 큼). 그래서 이 방식은 걷어내고,
+  파티 배치 화면(균일 6x6 격자)에서 실측한 격자선 위치로 25개 2x2 블록 중심을 미리
+  계산해 고정 좌표(GRID_CENTERS_FRAC)로 써서 순서대로(1~25번) 클릭한다. 이 좌표들이
+  실제 편성 보기 화면에서도 그대로 맞는지는 라이브 테스트로 확인함.
+- 스크린샷 저장은 아직 구현하지 않았다(클릭까지만 동작).
 """
 
 from __future__ import annotations
@@ -105,10 +114,39 @@ WAIT_AFTER_ESC = 1.1
 # 스크롤 후 화면이 안정될 때까지 대기 시간(초)
 SCROLL_WAIT = 1.4
 
+# 격자 좌표 클릭 후 화면(선택 표시)이 반영될 때까지 대기 시간(초).
+# 팝업 없이 선택만 되는 동작이라 짧게 잡음.
+WAIT_AFTER_GROUP_CLICK = 0.6
+
+# 25개 격자 중심 좌표를 계산할 때 기준으로 삼은 창 크기.
+# 파티 배치 화면(균일 6x6 격자)을 이 크기로 캡처해서 격자선 위치를 실측했다.
+GRID_REFERENCE_SIZE = (600, 1030)
+
+# 격자선 픽셀 좌표 (GRID_REFERENCE_SIZE 기준). 세로선 7개/가로선 7개 = 6x6 칸.
+GRID_COL_LINES_PX = [75, 150, 225, 275, 325, 400, 475]
+GRID_ROW_LINES_PX = [250, 325, 400, 475, 545, 600, 650]
+
 # True 로 하면 실제 클릭 없이 어디를 클릭할지 콘솔에만 출력(좌표 확인용)
 DRY_RUN = False
 
 # ====================================================================
+
+
+def _compute_grid_centers_frac() -> list[tuple[float, float]]:
+    """GRID_COL_LINES_PX/GRID_ROW_LINES_PX(격자선 7x7)로 배치 가능한 2x2 블록 25개의
+    중심 좌표를 비율(0~1)로 계산한다. 순서는 왼쪽위부터 행 우선(row-major)으로 1~25번."""
+    ref_w, ref_h = GRID_REFERENCE_SIZE
+    centers: list[tuple[float, float]] = []
+    for row in range(len(GRID_ROW_LINES_PX) - 2):
+        for col in range(len(GRID_COL_LINES_PX) - 2):
+            cx = (GRID_COL_LINES_PX[col] + GRID_COL_LINES_PX[col + 2]) / 2
+            cy = (GRID_ROW_LINES_PX[row] + GRID_ROW_LINES_PX[row + 2]) / 2
+            centers.append((cx / ref_w, cy / ref_h))
+    return centers
+
+
+# 25개 격자 중심 좌표 (비율, 0~1). 1번부터 25번까지 순서 고정.
+GRID_CENTERS_FRAC = _compute_grid_centers_frac()
 
 
 def find_emulator_window(title_substring: str):
@@ -188,12 +226,12 @@ def is_still_formation_screen(win, rank_num: int, attempt: int, check_template: 
         return True
 
 
-def save_rank_screenshot(win, rank_num: int) -> bool:
-    """현재 화면(펫 편성 화면)을 캡처해서 screenshots/rank_N.png 로 저장.
-    저장에 실패해도 전체 스크립트가 멈추지 않도록 예외를 여기서 잡고 성공 여부만 반환한다."""
+def save_rank_screenshot(image: Image.Image, rank_num: int) -> bool:
+    """이미 캡처해둔 펫 편성 화면 이미지를 screenshots/rank_N.png 로 저장.
+    캡처 자체는 호출부(click_and_capture)에서 하고 이 함수는 저장만 담당한다.
+    저장 실패해도 전체 스크립트가 멈추지 않도록 예외를 여기서 잡고 성공 여부만 반환한다."""
     try:
         os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
-        image = capture_window(win)
         path = os.path.join(SCREENSHOTS_DIR, f"rank_{rank_num}.png")
         image.save(path)
         print(f"  -> 스크린샷 저장: {path}")
@@ -201,6 +239,28 @@ def save_rank_screenshot(win, rank_num: int) -> bool:
     except OSError as e:
         print(f"  [오류] {rank_num}위 스크린샷 저장 실패: {e}")
         return False
+
+
+def click_grid_centers(win, rank_num: int) -> None:
+    """GRID_CENTERS_FRAC 의 25개 격자 중심 좌표를 1~25번 순서대로 클릭한다.
+    클릭해도 팝업 없이 선택만 되는 동작이라 좌표끼리는 별도 대기/복귀 없이 이어서 진행한다.
+    스크린샷 저장은 아직 미구현(TODO). 한 좌표 처리가 실패해도(좌표 범위 오류, 클릭 실패 등)
+    나머지 좌표는 계속 처리한다."""
+    for idx, (x_frac, y_frac) in enumerate(GRID_CENTERS_FRAC, start=1):
+        x, y = coord_to_pixels(win, x_frac, y_frac)
+
+        if not is_point_in_window(win, x, y):
+            print(f"  [오류] {rank_num}위 {idx}번 격자 좌표가 창 범위를 벗어남: ({x}, {y})")
+            continue
+
+        try:
+            pyautogui.moveTo(x, y, duration=0.15)
+            pyautogui.click()
+            time.sleep(WAIT_AFTER_GROUP_CLICK)  # 선택 표시 반영 대기
+            print(f"    -> {idx}번 격자 좌표 클릭 완료 ({x}, {y})")
+            # TODO: 좌표별 스크린샷 저장 기능은 아직 구현 안 함
+        except Exception as e:
+            print(f"  [오류] {rank_num}위 {idx}번 격자 좌표 처리 중 문제 발생: {e}")
 
 
 def scroll_one_row(win, row_height_frac: float = ROW_HEIGHT_FRAC) -> None:
@@ -248,7 +308,11 @@ def click_and_capture(win, rank_num: int, x: int, y: int, check_template: np.nda
         pyautogui.click()
         time.sleep(WAIT_AFTER_CLICK)  # 펫 편성 화면 로딩 대기
 
-        ok = save_rank_screenshot(win, rank_num)
+        image = capture_window(win)
+        ok = save_rank_screenshot(image, rank_num)
+
+        # 25개 격자 중심 좌표를 1~25번 순서대로 클릭 (스크린샷 저장은 아직 미구현)
+        click_grid_centers(win, rank_num)
 
         # ESC를 누른 뒤 실제로 목록 화면으로 돌아왔는지 템플릿 매칭으로 확인한다. 렉 등으로
         # ESC 입력이 씹혀서 편성 화면에 그대로 머무는 경우가 있어, check.png 배경이 여전히
