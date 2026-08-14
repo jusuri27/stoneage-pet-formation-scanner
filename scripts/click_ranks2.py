@@ -40,11 +40,12 @@ example/example_image.png(557x993)를 OCR로 한 번 분석해서 "N위" 텍스�
   파티 배치 화면(균일 6x6 격자)에서 실측한 격자선 위치로 25개 2x2 블록 중심을 미리
   계산해 고정 좌표(GRID_CENTERS_FRAC)로 써서 순서대로(1~25번) 클릭한다. 이 좌표들이
   실제 편성 보기 화면에서도 그대로 맞는지는 라이브 테스트로 확인함.
-- 25개 좌표 중 1번(첫 클릭) 좌표만 우선 구현: 클릭 후 화면을 캡처해서 assets/ 폴더의
-  캐릭터 초상화 6장과 OpenCV 템플릿 매칭으로 비교, 가장 점수 높은 이름으로
-  screenshots/rank_N_이름.png 를 저장한다. 실측해보니 정답 캐릭터는 점수가 1.0에
-  가깝고 나머지는 0.6을 못 넘어서 구분이 뚜렷하다. 2~25번은 아직 클릭만 하고 저장은
-  구현 안 함(TODO).
+- 25개 좌표를 클릭할 때마다 화면을 캡처해서 assets/ 폴더의 캐릭터 초상화 6장과 OpenCV
+  템플릿 매칭으로 비교, 가장 점수 높은 이름을 구한다. 실측해보니 정답 캐릭터는 점수가
+  1.0에 가깝고 나머지는 0.6을 못 넘어서 구분이 뚜렷하다. 1번 좌표는 무조건 저장하고,
+  2~25번은 직전에 저장한 이름과 다를 때만(=화면 하단 조련사가 바뀌었을 때만) 새로
+  저장한다. 파일명은 screenshots/rank_{순위}_{격자클릭순번}_{이름}.png 로, 가운데
+  숫자는 몇 번째로 새 조련사가 나왔는지가 아니라 실제 클릭한 격자 순번(1~25) 그대로다.
 """
 
 from __future__ import annotations
@@ -299,11 +300,15 @@ def save_rank_screenshot(image: Image.Image, rank_num: int) -> bool:
 
 def click_grid_centers(win, rank_num: int, asset_templates: dict[str, np.ndarray]) -> None:
     """GRID_CENTERS_FRAC 의 25개 격자 중심 좌표를 1~25번 순서대로 클릭한다.
-    1번(첫 클릭) 좌표만 클릭 후 화면을 캡처해서 assets 초상화와 매칭하고, 매칭된 이름으로
-    screenshots/rank_N_이름.png 를 저장한다(우선 1번만 구현, 2~25번은 클릭만 하고 저장은
-    TODO). 클릭해도 팝업 없이 선택만 되는 동작이라 좌표끼리는 별도 대기/복귀 없이 이어서
-    진행한다. 한 좌표 처리가 실패해도(좌표 범위 오류, 클릭/매칭/저장 실패 등) 나머지
-    좌표는 계속 처리한다."""
+    좌표를 클릭할 때마다 화면을 캡처해서 assets 초상화와 매칭하고, 화면 하단에 보이는
+    조련사가 "직전에 저장한 조련사"와 달라졌을 때만(1번 좌표는 무조건) 새 스크린샷을
+    screenshots/rank_{rank_num}_{격자클릭순번idx}_{이름}.png 로 저장한다. 같은 조련사가
+    계속 보이는 동안 매 격자마다 저장하면 사실상 같은 화면이 중복 저장되므로, 변경
+    감지로 필요한 시점에만 저장한다. 클릭해도 팝업 없이 선택만 되는 동작이라 좌표끼리는
+    별도 대기/복귀 없이 이어서 진행한다. 한 좌표 처리가 실패해도(좌표 범위 오류, 클릭/
+    매칭/저장 실패 등) 나머지 좌표는 계속 처리한다."""
+    last_saved_name: str | None = None  # 직전에 저장한 조련사 이름(변경 감지 기준)
+
     for idx, (x_frac, y_frac) in enumerate(GRID_CENTERS_FRAC, start=1):
         x, y = coord_to_pixels(win, x_frac, y_frac)
 
@@ -316,21 +321,27 @@ def click_grid_centers(win, rank_num: int, asset_templates: dict[str, np.ndarray
             pyautogui.click()
             time.sleep(WAIT_AFTER_GROUP_CLICK)  # 선택 표시 반영 대기
 
-            if idx == 1:
-                screenshot = capture_window(win)
-                matched_name = match_asset_name(screenshot, asset_templates)
-                if matched_name is None:
-                    print(f"  [경고] {rank_num}위 1번 좌표 초상화를 특정하지 못함(임계값 미달) "
-                          f"-> unknown 으로 저장")
-                    matched_name = "unknown"
+            screenshot = capture_window(win)
+            matched_name = match_asset_name(screenshot, asset_templates)
+            if matched_name is None:
+                print(f"  [경고] {rank_num}위 {idx}번 좌표 초상화를 특정하지 못함(임계값 미달) "
+                      f"-> unknown 으로 처리")
+                matched_name = "unknown"
 
+            # 1번 좌표는 무조건 저장(최초 조련사), 이후는 이름이 바뀐 경우에만 저장한다.
+            # 파일명의 idx는 발견 순서가 아니라 실제 격자 클릭 순번(1~25) 그대로 사용한다.
+            if idx == 1 or matched_name != last_saved_name:
                 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
-                path = os.path.join(SCREENSHOTS_DIR, f"rank_{rank_num}_{matched_name}.png")
+                path = os.path.join(
+                    SCREENSHOTS_DIR, f"rank_{rank_num}_{idx}_{matched_name}.png"
+                )
                 screenshot.save(path)
-                print(f"    -> 1번 격자 좌표 클릭 및 매칭 스크린샷 저장: {path}")
+                print(f"    -> {idx}번 격자 좌표 클릭, 조련사 변경 감지({matched_name}) "
+                      f"-> 스크린샷 저장: {path}")
+                last_saved_name = matched_name
             else:
-                print(f"    -> {idx}번 격자 좌표 클릭 완료 ({x}, {y})")
-                # TODO: 2~25번 좌표의 스크린샷 저장/매칭 기능은 아직 구현 안 함
+                print(f"    -> {idx}번 격자 좌표 클릭 완료, 조련사 동일({matched_name}) "
+                      f"-> 저장 생략")
         except Exception as e:
             print(f"  [오류] {rank_num}위 {idx}번 격자 좌표 처리 중 문제 발생: {e}")
 
@@ -390,7 +401,7 @@ def click_and_capture(
         image = capture_window(win)
         ok = save_rank_screenshot(image, rank_num)
 
-        # 25개 격자 중심 좌표를 1~25번 순서대로 클릭 (1번만 캡처+매칭+저장, 2~25번은 미구현)
+        # 25개 격자 중심 좌표를 1~25번 순서대로 클릭하며 조련사 변경 시마다 스크린샷 저장
         click_grid_centers(win, rank_num, asset_templates)
 
         # ESC를 누른 뒤 실제로 목록 화면으로 돌아왔는지 템플릿 매칭으로 확인한다. 렉 등으로
