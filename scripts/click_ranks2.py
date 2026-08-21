@@ -40,12 +40,21 @@ example/example_image.png(557x993)를 OCR로 한 번 분석해서 "N위" 텍스�
   파티 배치 화면(균일 6x6 격자)에서 실측한 격자선 위치로 25개 2x2 블록 중심을 미리
   계산해 고정 좌표(GRID_CENTERS_FRAC)로 써서 순서대로(1~25번) 클릭한다. 이 좌표들이
   실제 편성 보기 화면에서도 그대로 맞는지는 라이브 테스트로 확인함.
-- 25개 좌표를 클릭할 때마다 화면을 캡처해서 assets/ 폴더의 캐릭터 초상화 6장과 OpenCV
+- 편성 화면에 막 들어간 직후의 첫 클릭은 화면 전환이 덜 끝난 상태라 조련사가 잘못
+  잡히는 경우가 있었다(예: 1번 좌표에서 uba로 잘못 잡히고, 몇 번 뒤 5번 좌표에서
+  진짜 uba가 다시 잡혀 같은 이름이 중복 저장됨). 그래서 16~25번 좌표를 먼저 클릭해
+  화면을 안정시키는 예열 구간을 두고(16~24번은 클릭만, 25번만 캡처/매칭), 그 다음
+  1~25번을 처음부터 다시 클릭하면서 실제 캡처/매칭/저장을 한다. 예열 마지막(25번)에서
+  확인한 조련사 이름은 실측의 시작 기준값으로 그대로 넘겨받는데, 빈 격자를 클릭하면
+  하단 조련사 이미지가 바뀌지 않고 직전 상태를 유지하는 특성 때문에(예: 예열 마지막이
+  루시인 상태에서 실측 1번이 빈 격자면 화면은 계속 루시) 기준값 없이 시작하면 이걸
+  "새 조련사"로 잘못 판단해 또 저장해버린다.
+- 실제 측정(1~25번) 중 화면을 캡처해서 assets/ 폴더의 캐릭터 초상화 6장과 OpenCV
   템플릿 매칭으로 비교, 가장 점수 높은 이름을 구한다. 실측해보니 정답 캐릭터는 점수가
-  1.0에 가깝고 나머지는 0.6을 못 넘어서 구분이 뚜렷하다. 1번 좌표는 무조건 저장하고,
-  2~25번은 직전에 저장한 이름과 다를 때만(=화면 하단 조련사가 바뀌었을 때만) 새로
-  저장한다. 파일명은 screenshots/rank_{순위}_{격자클릭순번}_{이름}.png 로, 가운데
-  숫자는 몇 번째로 새 조련사가 나왔는지가 아니라 실제 클릭한 격자 순번(1~25) 그대로다.
+  1.0에 가깝고 나머지는 0.6을 못 넘어서 구분이 뚜렷하다. 직전에 저장한 이름과 다를
+  때만(=화면 하단 조련사가 바뀌었을 때만) 새로 저장한다. 파일명은
+  screenshots/rank_{순위}_{격자클릭순번}_{이름}.png 로, 가운데 숫자는 몇 번째로 새
+  조련사가 나왔는지가 아니라 실제 클릭한 격자 순번(1~25) 그대로다.
 """
 
 from __future__ import annotations
@@ -298,16 +307,61 @@ def save_rank_screenshot(image: Image.Image, rank_num: int) -> bool:
         return False
 
 
-def click_grid_centers(win, rank_num: int, asset_templates: dict[str, np.ndarray]) -> None:
+def warm_up_grid_clicks(win, rank_num: int, asset_templates: dict[str, np.ndarray]) -> str | None:
+    """16~25번 격자 좌표를 클릭해서 화면을 안정시킨다.
+    펫 편성 화면에 막 들어간 직후의 첫 클릭은 전환이 덜 끝나 조련사가 잘못 잡히는 경우가
+    있어서, 실제 측정(click_grid_centers)을 시작하기 전에 이 예열 구간에서 불안정한
+    반응을 미리 소진시킨다. 16~24번은 캡처/매칭 없이 클릭만 하고, 마지막 25번만 캡처해서
+    매칭한 뒤 그 이름을 반환한다. 빈 격자를 클릭하면 하단 조련사 이미지가 바뀌지 않고
+    직전 상태를 유지하는데, 이 반환값을 click_grid_centers() 의 시작 기준값으로 넘겨줘야
+    실측 1번 좌표가 빈 격자라서 예열 마지막과 같은 조련사가 보일 때 "변경 없음"으로
+    올바르게 판단해 중복 저장을 막을 수 있다. 클릭 자체가 실패해도(좌표 범위 오류 등)
+    예열일 뿐이므로 남은 좌표는 계속 진행하고, 마지막 매칭까지 실패하면 이후 실측이
+    "1번 좌표부터 항상 저장"으로 동작하도록 None을 반환한다."""
+    warmup_coords = list(enumerate(GRID_CENTERS_FRAC, start=1))[15:25]  # 16~25번
+    baseline_name: str | None = None
+
+    for idx, (x_frac, y_frac) in warmup_coords:
+        x, y = coord_to_pixels(win, x_frac, y_frac)
+
+        if not is_point_in_window(win, x, y):
+            print(f"  [오류] {rank_num}위 예열 {idx}번 격자 좌표가 창 범위를 벗어남: ({x}, {y})")
+            continue
+
+        try:
+            pyautogui.moveTo(x, y, duration=0.15)
+            pyautogui.click()
+            time.sleep(WAIT_AFTER_GROUP_CLICK)  # 선택 표시 반영 대기
+
+            if idx == 25:  # 예열 마지막 좌표에서만 기준 조련사를 캡처/매칭한다
+                screenshot = capture_window(win)
+                matched_name = match_asset_name(screenshot, asset_templates)
+                baseline_name = matched_name if matched_name is not None else "unknown"
+                print(f"    -> 예열 완료, 실측 시작 기준 조련사: {baseline_name}")
+        except Exception as e:
+            print(f"  [오류] {rank_num}위 예열 {idx}번 격자 좌표 처리 중 문제 발생: {e}")
+
+    return baseline_name
+
+
+def click_grid_centers(
+    win,
+    rank_num: int,
+    asset_templates: dict[str, np.ndarray],
+    initial_name: str | None = None,
+) -> None:
     """GRID_CENTERS_FRAC 의 25개 격자 중심 좌표를 1~25번 순서대로 클릭한다.
-    좌표를 클릭할 때마다 화면을 캡처해서 assets 초상화와 매칭하고, 화면 하단에 보이는
-    조련사가 "직전에 저장한 조련사"와 달라졌을 때만(1번 좌표는 무조건) 새 스크린샷을
+    warm_up_grid_clicks() 로 화면을 미리 안정시킨 뒤 호출되는 것을 전제로 하며,
+    initial_name 에는 그 예열 마지막 좌표에서 확인한 조련사 이름을 넘겨받는다(없으면
+    None, 이 경우 1번 좌표는 무조건 저장됨). 좌표를 클릭할 때마다 화면을 캡처해서
+    assets 초상화와 매칭하고, 화면 하단에 보이는 조련사가 "직전에 저장한(또는 예열에서
+    넘겨받은) 조련사"와 달라졌을 때만 새 스크린샷을
     screenshots/rank_{rank_num}_{격자클릭순번idx}_{이름}.png 로 저장한다. 같은 조련사가
     계속 보이는 동안 매 격자마다 저장하면 사실상 같은 화면이 중복 저장되므로, 변경
     감지로 필요한 시점에만 저장한다. 클릭해도 팝업 없이 선택만 되는 동작이라 좌표끼리는
     별도 대기/복귀 없이 이어서 진행한다. 한 좌표 처리가 실패해도(좌표 범위 오류, 클릭/
     매칭/저장 실패 등) 나머지 좌표는 계속 처리한다."""
-    last_saved_name: str | None = None  # 직전에 저장한 조련사 이름(변경 감지 기준)
+    last_saved_name: str | None = initial_name  # 직전에 저장한(또는 예열에서 넘겨받은) 조련사 이름
 
     for idx, (x_frac, y_frac) in enumerate(GRID_CENTERS_FRAC, start=1):
         x, y = coord_to_pixels(win, x_frac, y_frac)
@@ -328,9 +382,9 @@ def click_grid_centers(win, rank_num: int, asset_templates: dict[str, np.ndarray
                       f"-> unknown 으로 처리")
                 matched_name = "unknown"
 
-            # 1번 좌표는 무조건 저장(최초 조련사), 이후는 이름이 바뀐 경우에만 저장한다.
-            # 파일명의 idx는 발견 순서가 아니라 실제 격자 클릭 순번(1~25) 그대로 사용한다.
-            if idx == 1 or matched_name != last_saved_name:
+            # last_saved_name 이 예열 마지막 조련사로 채워져 있으므로, 1번 좌표가 빈 격자라
+            # 예열 때와 같은 조련사가 그대로 보이는 경우 "변경 없음"으로 저장을 건너뛴다.
+            if matched_name != last_saved_name:
                 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
                 path = os.path.join(
                     SCREENSHOTS_DIR, f"rank_{rank_num}_{idx}_{matched_name}.png"
@@ -401,8 +455,10 @@ def click_and_capture(
         image = capture_window(win)
         ok = save_rank_screenshot(image, rank_num)
 
-        # 25개 격자 중심 좌표를 1~25번 순서대로 클릭하며 조련사 변경 시마다 스크린샷 저장
-        click_grid_centers(win, rank_num, asset_templates)
+        # 16~25번 좌표를 먼저 클릭해 화면을 안정시키고(예열) 그 마지막 조련사를 기준값으로
+        # 받아온 뒤, 1~25번을 다시 클릭하며 그 기준값과 달라질 때마다 스크린샷 저장
+        baseline_name = warm_up_grid_clicks(win, rank_num, asset_templates)
+        click_grid_centers(win, rank_num, asset_templates, baseline_name)
 
         # ESC를 누른 뒤 실제로 목록 화면으로 돌아왔는지 템플릿 매칭으로 확인한다. 렉 등으로
         # ESC 입력이 씹혀서 편성 화면에 그대로 머무는 경우가 있어, check.png 배경이 여전히
